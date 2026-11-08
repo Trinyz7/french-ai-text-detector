@@ -1,0 +1,18 @@
+# Données et modèles téléchargés/générés localement
+/data/*.csv
+/models/*.joblib
+/models/*.json
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+# Éditeurs, OS et secrets
+.vscode/
+.idea/
+.DS_Store
+.env
+# Exports
+outputs/
