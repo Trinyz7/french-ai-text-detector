@@ -61,16 +61,23 @@ except Exception as exc:
 with st.sidebar:
     st.header("À propos du modèle")
     st.write("**Langue ciblée :** français")
-    st.write("**Méthode :** TF-IDF mots / caractères + régression logistique")
-    st.write("**Corpus :** HC3 français (partiellement traduit)")
-    test = meta.get("test_seuil_prudent_ia", {})
+    st.write(f"**Méthode :** {meta.get('method', 'TF-IDF + régression logistique')}")
+    st.write("**Corpus :** HC3 français (traduit) + test sur textes natifs")
+    test = meta.get("test", {}).get("seuil_0_5") or meta.get("test_seuil_0_5", {})
     if test:
         st.divider()
-        st.subheader("Évaluation sur le corpus de test")
-        st.metric("Précision IA", f"{test.get('precision_ia', 0):.1%}")
-        st.metric("Rappel IA", f"{test.get('rappel_ia', 0):.1%}")
-        st.metric("F1 IA", f"{test.get('f1_ia', 0):.1%}")
-        st.caption("Scores mesurés sur HC3, pas sur tous les textes du monde réel.")
+        st.subheader("Évaluation (seuil 0,5)")
+        st.metric("AUC — test HC3", f"{test.get('roc_auc', 0):.3f}")
+        native = meta.get("test_natif", {}).get("seuil_0_5")
+        if native:
+            st.metric("AUC — textes natifs français", f"{native.get('roc_auc', 0):.3f}")
+            st.metric("Faux positifs — textes natifs", f"{native.get('taux_faux_positifs', 0):.1%}")
+        lodo = meta.get("hors_domaine", {})
+        if "moyenne_auc" in lodo:
+            st.metric("AUC — domaines jamais vus", f"{lodo['moyenne_auc']:.3f}",
+                      help="Moyenne leave-one-domain-out : le modèle est évalué sur un "
+                           "domaine retiré de son entraînement.")
+        st.caption("Scores mesurés sur des corpus de recherche, pas sur tous les textes réels.")
     st.divider()
     st.markdown("[Documentation du corpus HC3](https://huggingface.co/datasets/almanach/hc3_french_ood)")
 
@@ -95,6 +102,20 @@ def render_result(result):
     c.metric("Phrases (approx.)", stats["phrases_approx"])
     for note in result["avertissements"]:
         st.caption("⚠️ " + note)
+    explanation = result.get("explication")
+    if explanation:
+        with st.expander("Pourquoi ce score ? (indices qui ont le plus pesé)"):
+            left, right = st.columns(2)
+            with left:
+                st.markdown("**Vers « IA »**")
+                for item in explanation["vers_ia"] or [{"indice": "aucun", "poids": 0}]:
+                    st.write(f"• {item['indice']}")
+            with right:
+                st.markdown("**Vers « humain »**")
+                for item in explanation["vers_humain"] or [{"indice": "aucun", "poids": 0}]:
+                    st.write(f"• {item['indice']}")
+            st.caption("Contributions de la régression logistique pour ce texte. "
+                       "Ce sont des corrélations apprises, pas des règles.")
 
 
 tab_text, tab_csv, tab_method = st.tabs(["Analyser un texte", "Analyser un fichier CSV", "Méthode et limites"])
@@ -138,7 +159,7 @@ with tab_csv:
                     if not text.strip():
                         outcomes.append({"categorie": "texte_vide", "score_ia": None})
                     else:
-                        r = analyze(text, model, meta)
+                        r = analyze(text, model, meta, explain=False)
                         outcomes.append({"categorie": r["categorie"], "score_ia": r["score_ia"]})
                 result_df = df.copy()
                 result_df["categorie"] = [r["categorie"] for r in outcomes]
@@ -154,12 +175,22 @@ with tab_csv:
 
 with tab_method:
     st.markdown("""
-**Comment ça marche ?** Le modèle apprend à différencier des textes étiquetés
-humains et des réponses générées par IA. Le TF-IDF encode les mots, les groupes
-de mots et les suites de caractères ; une régression logistique classe le texte.
+**Comment ça marche ?** Trois familles d'indices sont combinées dans une
+régression logistique calibrée :
 
-**Seuils :** déterminés sur un jeu de validation indépendant pour limiter les
-faux positifs sur ce corpus. Une zone d'incertitude évite de forcer une décision.
+1. **TF-IDF** sur les mots et les suites de caractères (vocabulaire, tournures) ;
+2. **stylométrie** : rythme et régularité des phrases, ponctuation, richesse du
+   vocabulaire, connecteurs typiques des LLM, registre familier, 1re personne… ;
+3. **perplexité** (si installée) : à quel point le texte est *prévisible* pour un
+   petit modèle de langue local (Qwen2.5-0.5B), avec le score *Binoculars* qui
+   compare deux modèles pour neutraliser la difficulté du sujet.
+
+**Données :** pour chaque question du corpus, une réponse humaine et une réponse
+IA sont gardées ensemble. Le modèle ne peut donc pas deviner l'origine d'après
+le sujet, seulement d'après la manière d'écrire.
+
+**Seuils :** calibrés sur un jeu de validation indépendant. Entre les deux seuils
+(au minimum 0,35–0,65), le résultat est « indéterminé » plutôt que forcé.
 
 **Limites :** le corpus provient majoritairement d'une traduction de textes
 anglais vers le français et d'anciens modèles de génération. Les domaines,

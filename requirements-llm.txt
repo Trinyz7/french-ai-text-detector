@@ -1,0 +1,5 @@
+# Facultatif : caractéristiques de perplexité (étape « Binoculars »).
+# Ajoute ~1 Go de dépendances + ~2 Go de modèles téléchargés une seule fois.
+-r requirements.txt
+torch>=2.6
+transformers>=4.50,<6

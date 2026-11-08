@@ -16,3 +16,9 @@ venv/
 .env
 # Exports
 outputs/
+
+# Corpus brut et caches de calcul
+/data/raw/
+/data/cache/
+/data/hf_cache/
+*.log

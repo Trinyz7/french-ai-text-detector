@@ -38,13 +38,14 @@ py -3 -m venv .venv
 # .\.venv\Scripts\Activate.ps1
 
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-llm.txt   # ou requirements.txt, sans la perplexité
 
-# Téléchargement gratuit d'un échantillon de HC3 français
+# Téléchargement du corpus HC3 français (~175 Mo, une seule fois)
 python -m detector.download_data
 
 # Entraîner et évaluer le modèle (création de models/detecteur_fr.joblib)
-python -m detector.train
+python -m detector.train                      # complet : TF-IDF + style + perplexité
+# python -m detector.train --config sans_llm  # plus léger, sans torch
 
 # Lancer le site local
 streamlit run app.py
@@ -61,16 +62,21 @@ sans appel réseau vers un LLM. Le site ne demande aucune clé API.
 
 ### Première installation plus rapide
 
-Pour récupérer moins de données (moins représentatif) :
+Sans torch et avec moins de données (moins représentatif) :
 
 ```powershell
-python -m detector.download_data --train-size 600 --validation-size 100 --test-size 100
-python -m detector.train
+pip install -r requirements.txt
+python -m detector.download_data --per-source-train 100
+python -m detector.train --config sans_llm --sans-hors-domaine
 ```
 
-Les tailles doivent être **paires et >= 20**. Par défaut, on utilise
-**2 000 train + 400 validation + 400 test**, échantillonnés à 50/50 par
-classe. La durée dépend de l'accès au serveur public Hugging Face et du PC.
+Par défaut : **300 questions par domaine** pour l'entraînement (soit
+~3 000 textes), 60 pour la validation, 50 pour le test, plus ~500 textes
+natifs. Le mode complet télécharge aussi deux petits modèles de langue
+(Qwen2.5-0.5B et sa version Instruct, ~2 Go) au premier lancement. Sur CPU,
+la perplexité prend environ **0,5 à 1 s par texte**. Pendant l'entraînement,
+les résultats sont mis en cache dans `data/cache/`. Les textes analysés dans
+l'application ne sont jamais mis en cache.
 
 ## 🐳 Alternative Docker (facultative)
 
@@ -130,40 +136,72 @@ python -m detector.predict "Je suis allé au marché ce matin et j'ai retrouvé 
 ## 🧪 Méthode ML
 
 ```text
-Corpus humain + IA (HC3 français)
-           |
-           v
-Train / validation / test (splits du dataset)
-           |
-           v
-Nettoyage, contrôle des labels et suppression des doublons exacts
-           |
-           v
-TF-IDF mots (1-2 grams) + TF-IDF caractères (3-5 grams)
-           |
-           v
-Régression logistique (Scikit-learn)
-           |
-           v
-Seuils de décision ajustés sur la validation
-           |
-           v
-Évaluation F1 / précision / rappel / AUC / faux positifs sur test
-           |
-           v
-Model .joblib + metrics.json -> Streamlit / FastAPI
+HC3 français (archive Hugging Face)
+     |
+     v
+Échantillonnage APPARIÉ : pour chaque question, 1 réponse humaine + 1 réponse IA,
+même quota par domaine (reddit, finance, medicine, open, wiki)
+     |
+     v
+Train / validation / test (splits du dataset) + test_natif (textes écrits en français)
+     |
+     v
+Caractéristiques :
+  - TF-IDF mots (1-2) + caractères (2-4)
+  - stylométrie (27 mesures : rythme des phrases, ponctuation, vocabulaire,
+    connecteurs typiques des LLM, registre familier, 1re personne...)
+  - perplexité / Binoculars avec Qwen2.5-0.5B (base + Instruct), facultatif
+     |
+     v
+Régression logistique -> calibration de Platt sur la validation
+     |
+     v
+Seuils humain / indéterminé / IA choisis sur la validation
+     |
+     v
+Évaluation : test HC3, test natif, leave-one-domain-out, détail par source
+     |
+     v
+models/detecteur_fr.joblib + metrics.json -> Streamlit / FastAPI / CLI
 ```
 
-`0` = humain ; `1` = IA. Le score IA est une sortie de modèle, **pas une
-probabilité garantie** ni une indication certaine de l'identité de l'auteur.
-Les seuils s'appuient sur les distributions des scores de validation :
-seuil IA autour du 95e percentile des scores humains (au moins 0,5), seuil
-humain autour du 5e percentile des scores IA (au plus 0,5). Les textes entre
-ces seuils sont « indéterminés ». Une limitation du taux de faux positifs
-**sur cette validation** n'implique pas la même propriété sur du texte réel.
+**Pourquoi l'échantillonnage apparié ?** Dans HC3, la part de réponses IA
+varie beaucoup selon le domaine. Avec un échantillon aléatoire, le modèle
+apprend « sujet financier → IA », et l'ancienne version classait **80 % des
+articles Wikipédia humains** comme IA. Avec des paires de réponses à la même
+question, seule la manière d'écrire permet de distinguer les classes.
 
-Les métriques calculées sont enregistrées dans `models/metrics.json`.
-La matrice de confusion suit l'ordre `[humain, IA]`.
+**Binoculars** (Hans et al., 2024) : on divise la perplexité du texte (modèle
+de base) par l'entropie croisée entre le modèle de base et sa version Instruct.
+Un texte IA est « prévisible » ; la normalisation évite de confondre un sujet
+simple avec un texte généré.
+
+`0` = humain ; `1` = IA. Le score est **calibré** sur la validation, mais
+reste une sortie de modèle, **pas une probabilité garantie**. Seuil IA :
+au-delà du 95e percentile des scores humains de validation (au moins 0,65) ;
+seuil humain : sous le 5e percentile des scores IA (au plus 0,35). Entre les
+deux, le texte est « indéterminé ».
+
+Chaque analyse renvoie aussi une **explication** : les indices (mots,
+mesures de style, perplexité) qui ont le plus poussé vers « IA » ou « humain ».
+
+Toutes les métriques sont enregistrées dans `models/metrics.json` (`test`,
+`test_natif`, `hors_domaine`, avec le détail par source). La matrice de
+confusion suit l'ordre `[humain, IA]`.
+
+<!-- RESULTATS -->
+
+## 🧰 Configurations
+
+| `--config` | Caractéristiques | Dépendances |
+|---|---|---|
+| `complet` (défaut) | TF-IDF + stylométrie + perplexité | `requirements-llm.txt` |
+| `sans_llm` | TF-IDF + stylométrie | `requirements.txt` |
+| `tfidf` | TF-IDF seul (ancienne méthode) | `requirements.txt` |
+| `style_llm` | stylométrie + perplexité, sans vocabulaire | `requirements-llm.txt` |
+| `style` | stylométrie seule | `requirements.txt` |
+
+Si torch n'est pas installé, `complet` bascule automatiquement sur `sans_llm`.
 
 ## 📁 Structure
 
@@ -173,9 +211,10 @@ french-ai-text-detector/
 ├── app.py                     # Interface Streamlit
 ├── api.py                     # API FastAPI (Swagger /docs)
 ├── detector/
-│   ├── download_data.py       # Données réelles via API publique Hugging Face
-│   ├── train.py               # Entraînement et évaluation
-│   ├── model.py               # TF-IDF + régression logistique
+│   ├── download_data.py       # Corpus HC3 FR, échantillonnage apparié, test natif
+│   ├── train.py               # Entraînement, calibration, évaluations
+│   ├── model.py               # Pipeline, calibration, explications
+│   ├── features.py            # Stylométrie + perplexité (Binoculars)
 │   ├── inference.py           # Analyse partagée entre interfaces
 │   ├── predict.py             # CLI
 │   └── config.py              # Chemins / sources / paramètres
@@ -184,6 +223,7 @@ french-ai-text-detector/
 ├── tests/                     # Tests sans accès Internet
 ├── .github/workflows/tests.yml
 ├── requirements.txt
+├── requirements-llm.txt       # torch + transformers (facultatif)
 ├── requirements-dev.txt
 ├── .gitignore
 └── LICENSE
@@ -192,10 +232,14 @@ french-ai-text-detector/
 ## 📦 Données : source, provenance et licence
 
 **[almanach/hc3_french_ood](https://huggingface.co/datasets/almanach/hc3_french_ood)**
-(Inria / ALMAnaCH). Subset `hc3_fr_qa`. Contient des réponses humaines et
-générées par ChatGPT avec `answer`, `label`, `source`. Les sources sont
-majoritairement **traduites en français depuis l'anglais**, donc leur style
-ne représente pas parfaitement des rédactions natives françaises.
+(Inria / ALMAnaCH). Fichiers utilisés :
+
+- `hc3_fr/*_qa_examples.json` : questions/réponses HC3 **traduites de
+  l'anglais** (humain vs ChatGPT) → train / validation / test ;
+- `hc3_fr_chatgpt`, `qa_binggpt` : réponses de ChatGPT et BingGPT **écrites
+  directement en français** → `test_natif` (IA) ;
+- `faq_fr_gouv`, `faq_fr_random`, `qa_binglikehuman` : textes humains natifs
+  (FAQ de sites français, réponses web) → `test_natif` (humain).
 
 Le dépôt du dataset indique **CC BY-SA 4.0**, avec possibilité de conditions
 plus restrictives pour les sources initiales. Pour cette raison, ce dépôt
@@ -204,17 +248,18 @@ licences spécifiques et modalités d'utilisation avant de redistribuer un
 modèle ou des données. La licence MIT de ce dépôt concerne **uniquement notre
 code**, pas les données de tiers.
 
-L'outil de téléchargement passe par l'API publique
-[Hugging Face Dataset Viewer](https://huggingface.co/docs/dataset-viewer/en/quick_start)
-(`rows`, jusqu'à 100 lignes par requête). En cas d'indisponibilité ou de
-limitation du service, réessaie plus tard. Aucune clé payante n'est requise.
+Le script télécharge l'archive `data.tar.gz` du dépôt Hugging Face, car
+l'API *Dataset Viewer* ne prend plus en charge ce dataset. Il n'en extrait que
+les fichiers français. Aucune clé n'est requise.
 
 ### Utiliser tes propres données
 
 Tu peux remplacer les CSV dans `data/` par des fichiers personnels :
 
 - `data/train.csv`, `data/validation.csv`, `data/test.csv`
-- Colonnes minimales `text,label` (labels entiers `0` humain, `1` IA)
+- Colonnes minimales `text,label` (labels entiers `0` humain, `1` IA).
+  La colonne `source` est facultative : elle active le détail par domaine et
+  le leave-one-domain-out. `data/test_natif.csv` est facultatif.
 - Chaque partition doit contenir les deux classes (au moins 5 exemples chacune)
 - **Ne jamais** mettre le même texte dans deux partitions ni entraîner sur test.
 - Diversifier thèmes, auteurs, générateurs IA, longueurs et styles. Vérifier
@@ -256,30 +301,13 @@ françaises est indispensable avant tout usage sensible.
 
 ## 🗺️ Améliorations possibles
 
-1. Construire un jeu de test externe : **textes natifs français** de différents
-   auteurs, modèles IA récents, paraphrases et textes humain+IA.
-2. Mesurer la qualité par longueur, sujet, style et source pour identifier les biais.
-3. Tester un **CamemBERT** finement entraîné (GPU utile, mais facultatif pour la V1).
-4. Comparer un classifieur SVM et un modèle à base de transformers sur les
-   **mêmes splits**, sans contamination de données.
-5. Mettre en ligne Streamlit pour une démonstration gratuite en respectant
-   les ressources et conditions de l'hébergeur (les offres peuvent évoluer).
-
-## Publier sur GitHub
-
-Créer un dépôt vide, puis dans ce dossier :
-
-```powershell
-git init
-git add .
-git commit -m "Initial commit - French AI Text Detector"
-git branch -M main
-git remote add origin https://github.com/TON-PSEUDO/french-ai-text-detector.git
-git push -u origin main
-```
-
-Les données et modèles sont ignorés volontairement. Pense à partager une
-capture de l'interface **et de vraies métriques obtenues après entraînement**.
+1. Ajouter des textes de **LLM récents** (2025-2026) et des textes humains
+   natifs variés (rédactions, mails, articles), d'abord au test natif, puis à
+   l'entraînement.
+2. Tester la robustesse aux **paraphrases** et aux textes mixtes humain + IA.
+3. Comparer avec un **CamemBERT** finement entraîné sur les mêmes splits.
+4. Essayer d'autres paires de modèles pour Binoculars : un modèle plus gros
+   est plus fiable, mais plus lent sur CPU.
 
 ## Licence
 

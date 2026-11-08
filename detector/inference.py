@@ -18,7 +18,13 @@ def load_detector(model_path=MODEL_PATH, meta_path=META_PATH):
             "puis 'python -m detector.train'."
         )
     # Attention : joblib / pickle ne doit jamais charger des modèles non fiables.
-    return joblib.load(model_path), json.loads(meta_path.read_text(encoding="utf-8"))
+    model = joblib.load(model_path)
+    if not hasattr(model, "explain"):
+        raise RuntimeError(
+            "Modèle d'une ancienne version : relance 'python -m detector.download_data' "
+            "puis 'python -m detector.train'."
+        )
+    return model, json.loads(meta_path.read_text(encoding="utf-8"))
 
 
 def text_statistics(text):
@@ -30,14 +36,17 @@ def text_statistics(text):
     }
 
 
-def analyze(text, model, metadata):
+def analyze(text, model, metadata, explain=True):
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Saisis un texte non vide")
     text = text.strip()
     if len(text) > MAX_TEXT_CHARS:
         raise ValueError(f"Le texte dépasse {MAX_TEXT_CHARS:,} caractères")
     stats = text_statistics(text)
-    probability_ai = float(model.predict_proba([text])[0, 1])
+    if explain:
+        probability_ai, explanation = model.predict_with_explanation(text)
+    else:
+        probability_ai, explanation = float(model.predict_proba([text])[0, 1]), None
     low = float(metadata["thresholds"]["human"])
     high = float(metadata["thresholds"]["ai"])
     if probability_ai >= high:
@@ -59,4 +68,5 @@ def analyze(text, model, metadata):
         "score_humain": round(1 - probability_ai, 4),
         "statistiques": stats,
         "avertissements": warnings,
+        "explication": explanation,
     }
