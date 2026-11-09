@@ -189,7 +189,31 @@ Toutes les métriques sont enregistrées dans `models/metrics.json` (`test`,
 `test_natif`, `hors_domaine`, avec le détail par source). La matrice de
 confusion suit l'ordre `[humain, IA]`.
 
-<!-- RESULTATS -->
+## 📊 Résultats (novembre 2026, CPU, données par défaut)
+
+AUC au seuil 0,5 ; FPR = taux de textes humains classés IA.
+
+| Configuration | AUC test HC3 | FPR wiki (test) | AUC domaines jamais vus¹ | AUC test natif² | FPR test natif |
+|---|---|---|---|---|---|
+| Ancienne version (TF-IDF, échantillon aléatoire) | 0,933 | **80 %** | – | – | – |
+| `tfidf` (nouvelles données) | 0,984 | 21 % | 0,940 | 0,863 | 4 % |
+| `sans_llm` | 0,979 | 11 % | 0,936 | 0,892 | 11 % |
+| `style_llm` | 0,993 | 5 % | **0,981** | 0,931 | 10 % |
+| **`complet`** (défaut) | **0,995** | **5 %** | 0,979 | **0,934** | 10 % |
+
+¹ Moyenne leave-one-domain-out sur reddit, finance, medicine, open et wiki.
+² 216 textes IA (ChatGPT/BingGPT en français) et 280 textes humains natifs.
+
+Avec les seuils prudents du mode `complet` sur le **test natif** : 87,5 % des
+textes humains sont reconnus humains, 7,5 % classés IA et 5 % indéterminés ;
+74,5 % des textes IA sont reconnus IA. Les réponses BingGPT (avec sources et
+style web) sont les plus difficiles (51 % détectées), tout comme les textes
+humains écrits pour *imiter* BingGPT (30 % de faux positifs).
+
+**À retenir :** la perplexité apporte le gain le plus net hors distribution,
+et les mesures sans vocabulaire (`style_llm`) généralisent aussi bien que le
+modèle complet. Ces chiffres portent sur des générations de 2022-2023 et ne
+garantissent rien pour les LLM récents.
 
 ## 🧰 Configurations
 

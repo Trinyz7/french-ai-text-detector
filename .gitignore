@@ -22,3 +22,4 @@ outputs/
 /data/cache/
 /data/hf_cache/
 *.log
+.claude/
