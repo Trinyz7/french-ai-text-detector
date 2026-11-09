@@ -85,3 +85,22 @@ def test_fastapi(trained, monkeypatch):
     assert "score_ia" in response.json()
     assert len(client.post("/predict/batch", json={"texts": ["Un", "Deux"]}).json()["results"]) == 2
     assert client.post("/predict", json={"text": ""}).status_code == 422
+
+
+def test_llm_reference_check_detects_drift(trained, monkeypatch):
+    model, meta, *_ = trained
+
+    class FakeLM:
+        values = [1.0, 2.0, 3.0]
+
+        def reference_values(self):
+            return self.values
+
+    fake = FakeLM()
+    monkeypatch.setattr(model, "_llm_features", lambda: fake)
+    model.record_llm_reference()
+    assert model.check_llm()
+    fake.values = [1.0, 2.5, 3.0]
+    assert not model.check_llm()
+    with pytest.raises(RuntimeError):
+        analyze("Un texte quelconque pour vérifier le contrôle de cohérence.", model, meta)

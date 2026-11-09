@@ -132,7 +132,13 @@ with tab_text:
         if not entered.strip():
             st.warning("Ajoute d'abord un texte à analyser.")
         else:
-            render_result(analyze(entered, model, meta))
+            try:
+                with st.spinner("Analyse en cours..."):
+                    result = analyze(entered, model, meta)
+            except RuntimeError as exc:
+                st.error(str(exc))
+            else:
+                render_result(result)
 
 with tab_csv:
     st.write("Importe un CSV contenant une colonne `text` (jusqu'à 250 lignes par analyse).")

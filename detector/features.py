@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -126,6 +127,17 @@ class StyleFeatures(BaseEstimator, TransformerMixin):
         return np.array([f"style:{n}" for n in STYLE_FEATURE_NAMES])
 
 
+# Un seul calcul à la fois par processus : Streamlit et FastAPI exécutent les
+# requêtes dans plusieurs threads qui partagent les mêmes modèles.
+_LM_LOCK = threading.RLock()
+
+# Phrase fixe utilisée pour vérifier que le modèle de langue calcule toujours
+# les mêmes valeurs qu'au moment de l'entraînement.
+LM_REFERENCE_TEXT = (
+    "Le télétravail présente de nombreux avantages, notamment une meilleure "
+    "autonomie. Cependant, il est important de noter qu'il comporte aussi des limites."
+)
+
 LM_FEATURE_NAMES = [
     "perplexite_log", "perplexite_log_instruit", "entropie_croisee",
     "score_binoculars", "variabilite_perte", "part_tokens_top1",
@@ -192,26 +204,38 @@ class PerplexityFeatures(BaseEstimator, TransformerMixin):
             self._dirty = False
 
     def _load_models(self):
-        if getattr(self, "_models", None) is None:
-            try:
-                import torch
-                from transformers import AutoModelForCausalLM, AutoTokenizer
-            except ImportError as exc:  # pragma: no cover - dépend de l'installation
-                raise ImportError(
-                    "Les caractéristiques de perplexité nécessitent torch et transformers : "
-                    "pip install -r requirements-llm.txt"
-                ) from exc
-            torch.set_grad_enabled(False)
-            tokenizer = AutoTokenizer.from_pretrained(self.observer)
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-            obs = AutoModelForCausalLM.from_pretrained(self.observer, dtype=torch.float32).eval()
-            perf = AutoModelForCausalLM.from_pretrained(self.performer, dtype=torch.float32).eval()
-            self._models = (torch, tokenizer, obs, perf)
+        with _LM_LOCK:
+            if getattr(self, "_models", None) is None:
+                self._models = self._really_load_models()
         return self._models
+
+    def _really_load_models(self):
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - dépend de l'installation
+            raise ImportError(
+                "Les caractéristiques de perplexité nécessitent torch et transformers : "
+                "pip install -r requirements-llm.txt"
+            ) from exc
+        tokenizer = AutoTokenizer.from_pretrained(self.observer)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        obs = AutoModelForCausalLM.from_pretrained(self.observer, dtype=torch.float32).eval()
+        perf = AutoModelForCausalLM.from_pretrained(self.performer, dtype=torch.float32).eval()
+        tokenizer.padding_side = "right"
+        return (torch, tokenizer, obs, perf)
 
     def _compute(self, texts):
         torch, tokenizer, obs, perf = self._load_models()
+        with _LM_LOCK, torch.inference_mode():
+            return self._compute_locked(torch, tokenizer, obs, perf, texts)
+
+    def reference_values(self):
+        """Mesures sur une phrase fixe : sert de contrôle de cohérence."""
+        return self._compute([LM_REFERENCE_TEXT])[0]
+
+    def _compute_locked(self, torch, tokenizer, obs, perf, texts):
         enc = tokenizer(list(texts), return_tensors="pt", padding=True, truncation=True,
                         max_length=self.max_tokens)
         obs_logits = obs(**enc).logits[:, :-1].float()

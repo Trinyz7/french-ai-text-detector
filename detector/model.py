@@ -114,6 +114,33 @@ class Detector:
                 branch.named_steps["calcul"].cache_dir = None
         return self
 
+    def _llm_features(self):
+        union = self.pipeline.named_steps["caracteristiques"]
+        for name, branch in union.transformer_list:
+            if name == "llm":
+                return branch.named_steps["calcul"]
+        return None
+
+    def record_llm_reference(self):
+        """Enregistre les mesures de la phrase de référence (à l'entraînement)."""
+        features = self._llm_features()
+        self.llm_reference = None if features is None else list(features.reference_values())
+        return self
+
+    def check_llm(self, tolerance=1e-3):
+        """Vrai si le modèle de langue redonne les valeurs de l'entraînement.
+
+        Protège contre un environnement incohérent (version de torch ou de
+        transformers différente, processus dans un état anormal...), qui
+        fausserait silencieusement tous les scores.
+        """
+        features = self._llm_features()
+        reference = getattr(self, "llm_reference", None)
+        if features is None or reference is None:
+            return True
+        current = features.reference_values()
+        return bool(np.allclose(current, reference, rtol=tolerance, atol=tolerance))
+
     @property
     def uses_llm(self):
         union = self.pipeline.named_steps["caracteristiques"]

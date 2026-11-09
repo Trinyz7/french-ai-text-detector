@@ -42,6 +42,12 @@ def analyze(text, model, metadata, explain=True):
     text = text.strip()
     if len(text) > MAX_TEXT_CHARS:
         raise ValueError(f"Le texte dépasse {MAX_TEXT_CHARS:,} caractères")
+    if hasattr(model, "check_llm") and not model.check_llm():
+        raise RuntimeError(
+            "Le calcul de perplexité ne redonne plus les valeurs de l'entraînement : "
+            "les scores seraient faux. Redémarre l'application (Ctrl+C puis "
+            "'streamlit run app.py') ; si le problème persiste, réentraîne le modèle."
+        )
     stats = text_statistics(text)
     if explain:
         probability_ai, explanation = model.predict_with_explanation(text)

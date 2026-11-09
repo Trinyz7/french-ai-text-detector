@@ -202,6 +202,8 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
     detector = Detector(build_pipeline(**config), description=config_name)
     detector.fit(tr["text"], tr["label"])
     detector.calibrate(va["text"], va["label"])
+    if detector.uses_llm:
+        detector.record_llm_reference()
     thresholds = choose_thresholds(va["label"], detector.predict_proba(va["text"])[:, 1])
 
     metrics = {

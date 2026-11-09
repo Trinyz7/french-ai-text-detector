@@ -32,7 +32,7 @@ def infer(text: str):
     try:
         model, meta = get_components()
         return analyze(text, model, meta)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
