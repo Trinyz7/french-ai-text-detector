@@ -62,7 +62,10 @@ with st.sidebar:
     st.header("À propos du modèle")
     st.write("**Langue ciblée :** français")
     st.write(f"**Méthode :** {meta.get('method', 'TF-IDF + régression logistique')}")
-    st.write("**Corpus :** HC3 français (traduit) + test sur textes natifs")
+    corpus = "HC3 français (traduit) + textes natifs"
+    if meta.get("test_recent"):
+        corpus += " + corpus Gemini (2026)"
+    st.write(f"**Corpus :** {corpus}")
     test = meta.get("test", {}).get("seuil_0_5") or meta.get("test_seuil_0_5", {})
     if test:
         st.divider()
@@ -72,6 +75,11 @@ with st.sidebar:
         if native:
             st.metric("AUC — textes natifs français", f"{native.get('roc_auc', 0):.3f}")
             st.metric("Faux positifs — textes natifs", f"{native.get('taux_faux_positifs', 0):.1%}")
+        recent = meta.get("test_recent", {}).get("seuil_0_5")
+        if recent:
+            st.metric("AUC — LLM récents (Gemini)", f"{recent.get('roc_auc', 0):.3f}",
+                      help="Textes Gemini et textes humains sur les mêmes sujets, "
+                           "jamais vus pendant l'entraînement.")
         lodo = meta.get("hors_domaine", {})
         if "moyenne_auc" in lodo:
             st.metric("AUC — domaines jamais vus", f"{lodo['moyenne_auc']:.3f}",

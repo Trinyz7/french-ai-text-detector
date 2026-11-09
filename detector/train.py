@@ -60,7 +60,7 @@ def load_partition(path, required=True):
     df = df.drop_duplicates(subset=["text"], keep="first")
     if "source" not in df.columns:
         df["source"] = "inconnu"
-    df["source"] = df["source"].fillna("inconnu").astype(str)
+    df["source"] = df["source"].fillna("inconnu").astype(str).str.replace(r"^hc3/", "", regex=True)
     if df["label"].nunique() != 2 or df["label"].value_counts().min() < 5:
         raise ValueError(f"Classes 0 et 1 obligatoires, >= 5 exemples chacune : {path}")
     return df.reset_index(drop=True)
@@ -169,13 +169,20 @@ def leave_one_domain_out(config, tr, va, te):
 
 
 def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_name="complet",
-          lodo=True, verbose=True):
+          lodo=True, verbose=True, recent=True):
     data_dir, model_path, meta_path = Path(data_dir), Path(model_path), Path(meta_path)
     frames = {split: load_partition(data_dir / f"{split}.csv")
               for split in ("train", "validation", "test")}
-    native = load_partition(data_dir / "test_natif.csv", required=False)
-    if native is not None:
-        frames["test_natif"] = native
+    # Corpus « LLM récents » (python -m detector.generate_data), s'il existe.
+    if recent:
+        for split in ("train", "validation"):
+            extra = load_partition(data_dir / f"recent_{split}.csv", required=False)
+            if extra is not None:
+                frames[split] = pd.concat([frames[split], extra], ignore_index=True)
+    for split in ("test_natif", "test_recent"):
+        extra = load_partition(data_dir / f"{split}.csv", required=False)
+        if extra is not None:  # évalué même avec --sans-recent, pour comparer
+            frames[split] = extra
 
     # Les textes identiques ne doivent jamais figurer dans plusieurs partitions.
     split_sets = {k: set(v["text"].str.casefold()) for k, v in frames.items()}
@@ -197,8 +204,7 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
 
     tr, va, te = frames["train"], frames["validation"], frames["test"]
     if verbose:
-        print(f"Configuration : {config_name} | train {len(tr)} ; validation {len(va)} ; test {len(te)}"
-              + (f" ; test natif {len(native)}" if native is not None else ""))
+        print(f"Configuration : {config_name} | " + " ; ".join(f"{k} {len(v)}" for k, v in frames.items()))
     detector = Detector(build_pipeline(**config), description=config_name)
     detector.fit(tr["text"], tr["label"])
     detector.calibrate(va["text"], va["label"])
@@ -216,10 +222,13 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
         "size": {k: len(v) for k, v in frames.items()},
         "thresholds": thresholds,
     }
-    for split in ("test", "test_natif"):
+    for split in ("test", "test_natif", "test_recent"):
         if split in frames:
             prob = detector.predict_proba(frames[split]["text"])[:, 1]
             metrics[split] = full_report(frames[split], prob, thresholds)
+            if "generateur" in frames[split].columns:
+                metrics[split]["par_generateur"] = per_source(
+                    frames[split].assign(source=frames[split]["generateur"].fillna("humain")), prob, 0.5)
     # Compatibilité avec l'ancienne interface (barre latérale).
     metrics["test_seuil_0_5"] = metrics["test"]["seuil_0_5"]
     metrics["test_seuil_prudent_ia"] = metrics["test"]["seuil_prudent_ia"]
@@ -229,7 +238,7 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
         metrics["hors_domaine"] = leave_one_domain_out(config, tr, va, te)
     metrics["limitations"] = [
         "Corpus HC3 français majoritairement traduit depuis l'anglais",
-        "Générations ChatGPT/BingGPT de 2022-2023 ; généralisation aux LLM récents non garantie",
+        "IA : ChatGPT/BingGPT (2022-2023) + Gemini 3.x (2026) ; autres LLM récents non testés",
         "Test natif : textes IA = réponses à des questions, textes humains = surtout des FAQ",
         "Le score est une sortie de modèle, pas une preuve d'auteur",
         "Les textes très courts et hors domaine sont particulièrement incertains",
@@ -261,7 +270,7 @@ def describe(config):
 
 def print_summary(m):
     print(f"\nSeuils : humain <= {m['thresholds']['human']:.3f} | IA >= {m['thresholds']['ai']:.3f}")
-    for split in ("test", "test_natif"):
+    for split in ("test", "test_natif", "test_recent"):
         if split in m:
             s = m[split]["seuil_0_5"]
             print(f"{split:11s} AUC {s['roc_auc']}  bal.acc {s['balanced_accuracy']}  "
@@ -279,10 +288,13 @@ def main():
     parser.add_argument("--meta-path", type=Path, default=META_PATH)
     parser.add_argument("--config", choices=sorted(CONFIGS), default="complet",
                         help="complet = TF-IDF + style + perplexité (nécessite requirements-llm.txt)")
+    parser.add_argument("--sans-recent", action="store_true",
+                        help="N'entraîne pas sur le corpus LLM récents (test_recent.csv reste évalué)")
     parser.add_argument("--sans-hors-domaine", action="store_true",
                         help="Saute l'évaluation leave-one-domain-out (plus rapide)")
     args = parser.parse_args()
-    train(args.data_dir, args.model_path, args.meta_path, args.config, lodo=not args.sans_hors_domaine)
+    train(args.data_dir, args.model_path, args.meta_path, args.config, lodo=not args.sans_hors_domaine,
+          recent=not args.sans_recent)
 
 
 if __name__ == "__main__":

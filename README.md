@@ -43,6 +43,10 @@ pip install -r requirements-llm.txt   # ou requirements.txt, sans la perplexité
 # Téléchargement du corpus HC3 français (~175 Mo, une seule fois)
 python -m detector.download_data
 
+# Facultatif mais recommandé : corpus « LLM récents » généré avec Gemini
+# (clé gratuite sur https://aistudio.google.com, voir « Corpus LLM récents »)
+python -m detector.generate_data
+
 # Entraîner et évaluer le modèle (création de models/detecteur_fr.joblib)
 python -m detector.train                      # complet : TF-IDF + style + perplexité
 # python -m detector.train --config sans_llm  # plus léger, sans torch
@@ -186,7 +190,7 @@ Chaque analyse renvoie aussi une **explication** : les indices (mots,
 mesures de style, perplexité) qui ont le plus poussé vers « IA » ou « humain ».
 
 Toutes les métriques sont enregistrées dans `models/metrics.json` (`test`,
-`test_natif`, `hors_domaine`, avec le détail par source). La matrice de
+`test_natif`, `test_recent`, `hors_domaine`, avec le détail par source et par générateur). La matrice de
 confusion suit l'ordre `[humain, IA]`.
 
 ## 📊 Résultats (novembre 2026, CPU, données par défaut)
@@ -212,8 +216,23 @@ humains écrits pour *imiter* BingGPT (30 % de faux positifs).
 
 **À retenir :** la perplexité apporte le gain le plus net hors distribution,
 et les mesures sans vocabulaire (`style_llm`) généralisent aussi bien que le
-modèle complet. Ces chiffres portent sur des générations de 2022-2023 et ne
-garantissent rien pour les LLM récents.
+modèle complet. Ces chiffres portent sur des générations de 2022-2023.
+
+### LLM récents (Gemini 3.x, `test_recent`)
+
+Le tableau ci-dessus ne dit rien des LLM actuels : un modèle entraîné
+seulement sur HC3 ne détecte presque aucun texte Gemini. Ajouter le corpus
+généré (voir « Corpus LLM récents ») corrige ce défaut :
+
+| Modèle `complet` | AUC `test_recent` | Textes Gemini détectés | Humains classés IA | AUC test HC3 | AUC test natif |
+|---|---|---|---|---|---|
+| Sans corpus récent | 0,605 | 1 % | 3 % | 0,995 | 0,934 |
+| **Avec corpus récent** (défaut) | **0,980** | **80 %** | 3 % | 0,989 | 0,920 |
+
+413 textes (206 paires humain/Gemini sur les mêmes sujets) jamais vus à
+l'entraînement, seuils prudents (IA ≥ 0,65). Les textes les plus difficiles
+sont les réponses courtes de type FAQ ou médecine. Les autres familles de
+modèles (GPT, Claude, Mistral...) n'ont pas été testées.
 
 ## 🧰 Configurations
 
@@ -236,6 +255,7 @@ french-ai-text-detector/
 ├── api.py                     # API FastAPI (Swagger /docs)
 ├── detector/
 │   ├── download_data.py       # Corpus HC3 FR, échantillonnage apparié, test natif
+│   ├── generate_data.py       # Corpus apparié « LLM récents » via l'API Gemini
 │   ├── train.py               # Entraînement, calibration, évaluations
 │   ├── model.py               # Pipeline, calibration, explications
 │   ├── features.py            # Stylométrie + perplexité (Binoculars)
@@ -276,6 +296,36 @@ Le script télécharge l'archive `data.tar.gz` du dépôt Hugging Face, car
 l'API *Dataset Viewer* ne prend plus en charge ce dataset. Il n'en extrait que
 les fichiers français. Aucune clé n'est requise.
 
+### Corpus « LLM récents » (Gemini)
+
+HC3 ne contient que du ChatGPT/BingGPT de 2022-2023 : un modèle entraîné
+uniquement dessus classe « humain » la plupart des textes de LLM actuels.
+`detector/generate_data.py` construit donc un corpus **apparié** : pour chaque
+texte humain écrit avant les LLM, Gemini rédige un texte sur le **même sujet**,
+pour que le détecteur ne puisse pas tricher en reconnaissant le thème.
+
+- Sujets humains : questions HC3 non utilisées, FAQ françaises
+  (`faq_fr_random`) et critiques de films
+  **[Allociné](https://huggingface.co/datasets/tblard/allocine)** (licence MIT).
+- Chaque génération tire au hasard un modèle Gemini, une température et un
+  style (neutre, forum, post LinkedIn, étudiant, avis personnel, expert,
+  « écris comme un humain »).
+- Découpage par sujet : `recent_train.csv` (60 %), `recent_validation.csv`
+  (15 %) et `test_recent.csv` (25 %, jamais vu à l'entraînement).
+
+Mise en place : crée un fichier `.env` à la racine (déjà ignoré par Git) :
+
+```text
+GEMINI_API_KEY=ta_cle
+```
+
+Le quota gratuit suffit (~1 h 30 pour ~870 sujets). Les réponses sont mises en
+cache dans `data/raw/gemini_cache.jsonl` : si le quota journalier est atteint,
+relance le lendemain sans rien perdre. `python -m detector.train` utilise
+automatiquement ces fichiers s'ils existent (`--sans-recent` pour les ignorer,
+`test_recent` reste évalué pour comparer). Les textes générés ne sont pas
+publiés dans ce dépôt ; respecte les conditions d'utilisation de l'API Gemini.
+
 ### Utiliser tes propres données
 
 Tu peux remplacer les CSV dans `data/` par des fichiers personnels :
@@ -311,7 +361,9 @@ HC3 ne garantit pas une bonne précision sur des textes d'étudiants, mails,
 articles français originaux ou réponses de modèles récents. Les textes
 humains très formels peuvent être faussement classés « IA » et inversement.
 Les réécritures humaines d'un texte IA rendent toute étiquette binaire
-conceptuellement difficile.
+conceptuellement difficile. Parmi les LLM récents, seul Gemini est représenté
+dans les données : les textes d'autres modèles (GPT, Claude, Mistral...)
+peuvent être moins bien détectés.
 
 **Ne pas utiliser seul pour sanctionner un élève, évaluer un candidat ou
 accuser une personne.** Une validation indépendante sur de vraies rédactions
@@ -325,9 +377,8 @@ françaises est indispensable avant tout usage sensible.
 
 ## 🗺️ Améliorations possibles
 
-1. Ajouter des textes de **LLM récents** (2025-2026) et des textes humains
-   natifs variés (rédactions, mails, articles), d'abord au test natif, puis à
-   l'entraînement.
+1. Ajouter d'autres **LLM récents** (GPT, Claude, Mistral, Llama...) au corpus
+   généré, et des textes humains natifs variés (rédactions, mails, articles).
 2. Tester la robustesse aux **paraphrases** et aux textes mixtes humain + IA.
 3. Comparer avec un **CamemBERT** finement entraîné sur les mêmes splits.
 4. Essayer d'autres paires de modèles pour Binoculars : un modèle plus gros

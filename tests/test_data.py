@@ -53,3 +53,13 @@ def test_style_features_detect_connectors_and_informal_register():
     assert formal["connecteurs_llm"] > casual["connecteurs_llm"]
     assert casual["familier"] > formal["familier"]
     assert casual["premiere_personne"] > formal["premiere_personne"]
+
+
+def test_strip_markdown_and_prompt():
+    from detector.generate_data import build_prompt, strip_markdown
+
+    assert strip_markdown("## Titre\n**Gras** et\n- point") == "Titre\nGras et\npoint"
+    prompt = build_prompt({"question": "Pourquoi le ciel est-il bleu ?"}, "linkedin", 120)
+    assert "Pourquoi le ciel est-il bleu ?" in prompt and "120 mots" in prompt
+    review = build_prompt({"polarity": "négative"}, "neutre", 80)
+    assert "critique de film négative" in review
