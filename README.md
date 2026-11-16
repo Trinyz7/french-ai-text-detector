@@ -63,6 +63,12 @@ sans appel réseau vers un LLM. Le site ne demande aucune clé API.
 > `source .venv/bin/activate`, et exécute les commandes `python ...`.
 >
 > Sur Windows, si `py -3` ne fonctionne pas, utilise `python -m venv .venv`.
+>
+> **« Une stratégie de contrôle d'application a bloqué ce fichier »** : c'est
+> le *Smart App Control* de Windows 11, qui bloque certaines DLL non signées
+> (`streamlit.exe`, des modules de scikit-learn...). Lance `python -m streamlit
+> run app.py` au lieu de `streamlit run app.py` ; si ce sont des DLL qui sont
+> bloquées, utilise Docker (section suivante), qui n'est pas concerné.
 
 ### Première installation plus rapide
 
