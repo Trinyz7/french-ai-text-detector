@@ -6,6 +6,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from .errors import adjust_probability, find_errors, human_evidence_factor
 from .features import PerplexityFeatures, StyleFeatures
 
 FRIENDLY_NAMES = {
@@ -83,10 +84,12 @@ class Detector:
     et que la zone « indéterminé » ait du sens.
     """
 
-    def __init__(self, pipeline, description=""):
+    def __init__(self, pipeline, description="", error_adjustment=True):
         self.pipeline = pipeline
         self.description = description
         self.calibrator = None
+        # Les fautes d'orthographe / de grammaire font baisser le score IA.
+        self.error_adjustment = error_adjustment
 
     def fit(self, texts, labels):
         self.pipeline.fit(list(texts), list(labels))
@@ -103,7 +106,11 @@ class Detector:
         return self
 
     def predict_proba(self, texts):
+        texts = list(texts)
         p = self._calibrate_scores(self.decision_function(texts))
+        if getattr(self, "error_adjustment", False):
+            p = np.array([adjust_probability(pi, human_evidence_factor(find_errors(t)))
+                          for pi, t in zip(p, texts)])
         return np.column_stack([1 - p, p])
 
     def disable_disk_cache(self):
@@ -155,7 +162,17 @@ class Detector:
     def predict_with_explanation(self, text, top=6):
         """Score IA + explication, en ne calculant les caractéristiques qu'une fois."""
         explanation, decision = self._explain(text, top)
-        return float(self._calibrate_scores([decision])[0]), explanation
+        probability = float(self._calibrate_scores([decision])[0])
+        if getattr(self, "error_adjustment", False):
+            errors = find_errors(text)
+            factor = human_evidence_factor(errors)
+            if factor < 1:
+                probability = adjust_probability(probability, factor)
+                item = {"indice": f"fautes repérées ({len(errors)})",
+                        "poids": round(float(np.log(factor)), 4), "type": "fautes"}
+                explanation["vers_humain"] = sorted(explanation["vers_humain"] + [item],
+                                                    key=lambda it: it["poids"])[:top]
+        return probability, explanation
 
     def explain(self, text, top=6):
         return self._explain(text, top)[0]

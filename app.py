@@ -110,6 +110,13 @@ def render_result(result):
     c.metric("Phrases (approx.)", stats["phrases_approx"])
     for note in result["avertissements"]:
         st.caption("⚠️ " + note)
+    errors = result.get("fautes") or []
+    if errors:
+        with st.expander(f"✍️ {len(errors)} faute(s) repérée(s) : plutôt un indice humain"):
+            for item in errors:
+                st.write(f"• « {item['extrait']} » — {item['type']}")
+            st.caption("Les LLM ne font presque jamais de fautes : elles comptent en faveur "
+                       "d'une rédaction humaine. Le repérage est simplifié et peut se tromper.")
     explanation = result.get("explication")
     if explanation:
         with st.expander("Pourquoi ce score ? (indices qui ont le plus pesé)"):

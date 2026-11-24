@@ -161,12 +161,17 @@ Caractéristiques :
   - stylométrie (27 mesures : rythme des phrases, ponctuation, vocabulaire,
     connecteurs typiques des LLM, registre familier, 1re personne...)
   - perplexité / Binoculars avec Qwen2.5-0.5B (base + Instruct), facultatif
+  (+ extraits courts de 25 à 75 mots pour apprendre les textes courts)
      |
      v
 Régression logistique -> calibration de Platt sur la validation
      |
      v
+Score baissé si le texte contient des fautes d'orthographe ou de grammaire
+     |
+     v
 Seuils humain / indéterminé / IA choisis sur la validation
+(seuils dédiés pour les textes de moins de 80 mots)
      |
      v
 Évaluation : test HC3, test natif, leave-one-domain-out, détail par source
@@ -192,11 +197,43 @@ au-delà du 95e percentile des scores humains de validation (au moins 0,65) ;
 seuil humain : sous le 5e percentile des scores IA (au plus 0,35). Entre les
 deux, le texte est « indéterminé ».
 
+**Fautes d'orthographe et de grammaire.** Un LLM n'en fait presque jamais :
+une faute est donc un indice de rédaction humaine. `detector/errors.py` repère,
+sans service externe :
+
+- les fautes d'orthographe typiques d'un humain : accent oublié ou erroné
+  (« tete », « succés »), lettre doublée en trop ou manquante, lettres
+  inversées, à partir du dictionnaire de
+  [pyspellchecker](https://github.com/barrust/pyspellchecker) (MIT). Un mot
+  simplement absent du dictionnaire (terme technique, mot étranger) ne compte pas ;
+- des fautes d'accord (« une crise majeur », « les problèmes économique ») ;
+- des confusions (« il à été », « il a manger », « ils mange », « il va mangé »).
+
+Les règles sont volontairement prudentes : elles ratent beaucoup de fautes
+mais signalent très rarement une phrase correcte (1 à 3 % des textes HC3).
+
+Les corpus ne permettent pas d'*apprendre* le poids d'une faute (textes HC3
+traduits automatiquement, textes humains publiés déjà relus). C'est donc une
+règle explicite, appliquée après la calibration : chaque faute d'accord ou
+confusion multiplie la cote IA (p / (1 − p)) par 0,4, chaque faute
+d'orthographe par 0,6, sans descendre sous 0,1. Au-delà de 3 fautes
+d'orthographe, on n'en tient plus compte : des accents omis partout sont un
+choix de style (Gemini le fait quand on lui demande d'« écrire comme un
+humain »), pas une inattention. L'application liste les fautes trouvées.
+Limite : un texte d'IA dans lequel on glisse quelques fautes exprès paraîtra
+plus humain.
+
+**Textes courts.** Un paragraphe isolé contient moins d'indices et quelques
+tournures toutes faites suffisent à faire pencher le score. Le modèle apprend
+donc aussi sur des extraits de 25 à 75 mots, et les textes de moins de 80 mots
+utilisent des seuils dédiés (`thresholds_court`), choisis de la même façon sur
+des extraits de la validation. Le test `test_court` mesure ce cas.
+
 Chaque analyse renvoie aussi une **explication** : les indices (mots,
 mesures de style, perplexité) qui ont le plus poussé vers « IA » ou « humain ».
 
 Toutes les métriques sont enregistrées dans `models/metrics.json` (`test`,
-`test_natif`, `test_recent`, `hors_domaine`, avec le détail par source et par générateur). La matrice de
+`test_natif`, `test_recent`, `test_court`, `hors_domaine`, avec le détail par source et par générateur). La matrice de
 confusion suit l'ordre `[humain, IA]`.
 
 ## 📊 Résultats (novembre 2026, CPU, données par défaut)
@@ -240,6 +277,24 @@ l'entraînement, seuils prudents (IA ≥ 0,65). Les textes les plus difficiles
 sont les réponses courtes de type FAQ ou médecine. Les autres familles de
 modèles (GPT, Claude, Mistral...) n'ont pas été testées.
 
+### Textes courts et fautes (`test_court`)
+
+815 extraits de 25 à 75 mots tirés des trois tests, jamais vus à l'entraînement :
+
+| Modèle `complet` | AUC | Textes IA classés humains | Humains classés IA |
+|---|---|---|---|
+| Sans extraits courts (seuils uniques) | 0,873 | 39 % | 2,8 % |
+| **Avec extraits courts + seuils dédiés** (défaut) | **0,889** | **11 %** | 3,1 % |
+
+Le prix de cette prudence : davantage de textes courts « indéterminés »
+(30 % des humains, 37 % des textes IA). La règle des fautes ne se déclenche
+que sur 2 à 4 % des textes de test et coûte au plus 0,7 point de détection
+IA ; son intérêt est surtout pour les textes rédigés à la main, rares dans ces
+corpus déjà relus. Exemple : un paragraphe de 54 mots écrit à la main
+(« une crise majeur ») passait de 64,6 % à 54,7 % (indéterminé) ; la même
+version corrigée obtient 80,7 % : un texte court, formel et sans faute reste
+difficile à distinguer d'un texte d'IA.
+
 ## 🧰 Configurations
 
 | `--config` | Caractéristiques | Dépendances |
@@ -265,6 +320,7 @@ french-ai-text-detector/
 │   ├── train.py               # Entraînement, calibration, évaluations
 │   ├── model.py               # Pipeline, calibration, explications
 │   ├── features.py            # Stylométrie + perplexité (Binoculars)
+│   ├── errors.py              # Repérage des fautes d'orthographe / d'accord
 │   ├── inference.py           # Analyse partagée entre interfaces
 │   ├── predict.py             # CLI
 │   └── config.py              # Chemins / sources / paramètres

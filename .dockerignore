@@ -7,3 +7,8 @@ data/*.csv
 models/*.joblib
 models/*.json
 .env
+data/hf_cache
+data/cache
+data/*.joblib
+data/*.log
+data/*.json

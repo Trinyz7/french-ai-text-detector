@@ -7,3 +7,4 @@ streamlit>=1.35,<2
 fastapi>=0.110,<1
 uvicorn>=0.29,<1
 pydantic>=2,<3
+pyspellchecker>=0.8,<1

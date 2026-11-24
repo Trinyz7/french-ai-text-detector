@@ -6,11 +6,15 @@ Trois évaluations complémentaires sont enregistrées dans metrics.json :
 * ``test_natif`` : textes rédigés directement en français (hors distribution) ;
 * ``hors_domaine`` : pour chaque domaine, un modèle entraîné *sans* ce domaine
   est évalué dessus (leave-one-domain-out). C'est la mesure la plus honnête de
-  la capacité à généraliser à des sujets jamais vus.
+  la capacité à généraliser à des sujets jamais vus ;
+* ``test_court`` : extraits de 25 à 75 mots des textes de test, pour mesurer
+  le comportement sur les textes courts (seuils dédiés ``thresholds_court``).
 """
 
 import argparse
 import json
+import random
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,7 +31,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from .config import DATA_DIR, HF_DATASET, META_PATH, MODEL_PATH
+from .config import DATA_DIR, HF_DATASET, META_PATH, MODEL_PATH, RANDOM_SEED
 from .model import Detector, build_pipeline
 
 # Écart minimal autour de 0,5 : sous ces bornes, on préfère dire « indéterminé ».
@@ -41,6 +45,41 @@ CONFIGS = {
     "style_llm": dict(words=False, chars=False, style=True, llm=True),
     "style": dict(words=False, chars=False, style=True, llm=False),
 }
+
+# Textes courts : en dessous de SHORT_TEXT_WORDS mots, l'application utilise des
+# seuils dédiés, choisis sur des extraits courts de la validation.
+SHORT_TEXT_WORDS = 80
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def short_excerpts(frame, fraction=1.0, seed=RANDOM_SEED, min_words=25, max_words=75):
+    """Extraits de quelques phrases consécutives (25 à 75 mots) des textes longs.
+
+    Les modèles apprennent sinon uniquement sur des textes de 100 à 300 mots,
+    et se trompent davantage sur un paragraphe isolé.
+    """
+    rng = random.Random(seed)
+    rows = []
+    for _, row in frame.iterrows():
+        if rng.random() > fraction:
+            continue
+        sentences = [x for x in SENTENCE_SPLIT_RE.split(row["text"].strip()) if x]
+        if len(sentences) < 2:
+            continue
+        target = rng.randint(min_words + 10, max_words)
+        start = rng.randrange(len(sentences))
+        picked, count = [], 0
+        for sentence in sentences[start:]:
+            if count and count + len(sentence.split()) > max_words:
+                break
+            picked.append(sentence)
+            count += len(sentence.split())
+            if count >= target:
+                break
+        if min_words <= count <= max_words and count < len(row["text"].split()) * 0.8:
+            rows.append({**row.to_dict(), "text": " ".join(picked)})
+    out = pd.DataFrame(rows, columns=frame.columns)
+    return out.drop_duplicates(subset=["text"]).reset_index(drop=True)
 
 
 def load_partition(path, required=True):
@@ -203,14 +242,29 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
             config["llm"] = False
 
     tr, va, te = frames["train"], frames["validation"], frames["test"]
+    # Extraits courts : une partie de l'entraînement, toute la validation et
+    # tous les tests (évaluation séparée « test_court »).
+    tr_short = short_excerpts(tr, fraction=0.4)
+    va_short = short_excerpts(va, fraction=1.0, seed=RANDOM_SEED + 1)
+    test_short = pd.concat(
+        [short_excerpts(frames[s], seed=RANDOM_SEED + 2).assign(source=lambda d, s=s: s + "/" + d["source"])
+         for s in ("test", "test_natif", "test_recent") if s in frames], ignore_index=True)
+    tr_all = pd.concat([tr, tr_short], ignore_index=True)
+    va_all = pd.concat([va, va_short], ignore_index=True)
     if verbose:
-        print(f"Configuration : {config_name} | " + " ; ".join(f"{k} {len(v)}" for k, v in frames.items()))
+        print(f"Configuration : {config_name} | " + " ; ".join(f"{k} {len(v)}" for k, v in frames.items())
+              + f" | extraits courts : train {len(tr_short)}, validation {len(va_short)}, test {len(test_short)}")
     detector = Detector(build_pipeline(**config), description=config_name)
-    detector.fit(tr["text"], tr["label"])
-    detector.calibrate(va["text"], va["label"])
+    detector.fit(tr_all["text"], tr_all["label"])
+    detector.calibrate(va_all["text"], va_all["label"])
     if detector.uses_llm:
         detector.record_llm_reference()
     thresholds = choose_thresholds(va["label"], detector.predict_proba(va["text"])[:, 1])
+    if len(va_short) and va_short["label"].value_counts().reindex([0, 1], fill_value=0).min() >= 5:
+        short_prob = detector.predict_proba(va_short["text"])[:, 1]
+        thresholds_court = choose_thresholds(va_short["label"], short_prob)
+    else:  # pas assez de textes longs pour en tirer des extraits
+        thresholds_court = dict(thresholds)
 
     metrics = {
         "date_utc": datetime.now(timezone.utc).isoformat(),
@@ -221,6 +275,8 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
         "labels": {"0": "humain", "1": "IA"},
         "size": {k: len(v) for k, v in frames.items()},
         "thresholds": thresholds,
+        "thresholds_court": thresholds_court,
+        "mots_texte_court": SHORT_TEXT_WORDS,
     }
     for split in ("test", "test_natif", "test_recent"):
         if split in frames:
@@ -229,6 +285,10 @@ def train(data_dir=DATA_DIR, model_path=MODEL_PATH, meta_path=META_PATH, config_
             if "generateur" in frames[split].columns:
                 metrics[split]["par_generateur"] = per_source(
                     frames[split].assign(source=frames[split]["generateur"].fillna("humain")), prob, 0.5)
+    if test_short["label"].nunique() == 2:
+        prob = detector.predict_proba(test_short["text"])[:, 1]
+        metrics["test_court"] = full_report(test_short, prob, thresholds_court)
+        metrics["test_court"]["decisions_seuils_longs"] = decision_summary(test_short["label"], prob, thresholds)
     # Compatibilité avec l'ancienne interface (barre latérale).
     metrics["test_seuil_0_5"] = metrics["test"]["seuil_0_5"]
     metrics["test_seuil_prudent_ia"] = metrics["test"]["seuil_prudent_ia"]
@@ -265,12 +325,15 @@ def describe(config):
         parts.append("stylométrie")
     if config.get("llm"):
         parts.append("perplexité / Binoculars (Qwen2.5-0.5B)")
-    return " + ".join(parts) + " → régression logistique calibrée"
+    return " + ".join(parts) + " → régression logistique calibrée, ajustée par les fautes repérées"
 
 
 def print_summary(m):
     print(f"\nSeuils : humain <= {m['thresholds']['human']:.3f} | IA >= {m['thresholds']['ai']:.3f}")
-    for split in ("test", "test_natif", "test_recent"):
+    if "thresholds_court" in m:
+        t = m["thresholds_court"]
+        print(f"Seuils textes courts : humain <= {t['human']:.3f} | IA >= {t['ai']:.3f}")
+    for split in ("test", "test_natif", "test_recent", "test_court"):
         if split in m:
             s = m[split]["seuil_0_5"]
             print(f"{split:11s} AUC {s['roc_auc']}  bal.acc {s['balanced_accuracy']}  "

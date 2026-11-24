@@ -7,6 +7,7 @@ from pathlib import Path
 import joblib
 
 from .config import MAX_TEXT_CHARS, META_PATH, MODEL_PATH
+from .errors import ERROR_LABELS, find_errors
 
 
 def load_detector(model_path=MODEL_PATH, meta_path=META_PATH):
@@ -53,8 +54,11 @@ def analyze(text, model, metadata, explain=True):
         probability_ai, explanation = model.predict_with_explanation(text)
     else:
         probability_ai, explanation = float(model.predict_proba([text])[0, 1]), None
-    low = float(metadata["thresholds"]["human"])
-    high = float(metadata["thresholds"]["ai"])
+    short = stats["mots"] < int(metadata.get("mots_texte_court", 80))
+    thresholds = metadata.get("thresholds_court") if short else None
+    thresholds = thresholds or metadata["thresholds"]
+    low, high = float(thresholds["human"]), float(thresholds["ai"])
+    errors = [{"type": ERROR_LABELS[kind], "extrait": excerpt} for kind, excerpt in find_errors(text)]
     if probability_ai >= high:
         category = "indices_ia"
         message = "Le modèle détecte des indices associés aux textes générés par IA."
@@ -65,8 +69,9 @@ def analyze(text, model, metadata, explain=True):
         category = "indetermine"
         message = "Le modèle ne distingue pas clairement l'origine du texte."
     warnings = ["Ce résultat statistique ne prouve jamais l'identité de l'auteur."]
-    if stats["mots"] < 80:
-        warnings.append("Texte court (moins de 80 mots) : interprétation particulièrement fragile.")
+    if short:
+        warnings.append(f"Texte court (moins de {metadata.get('mots_texte_court', 80)} mots) : "
+                        "seuils plus prudents, interprétation fragile.")
     return {
         "categorie": category,
         "message": message,
@@ -75,4 +80,6 @@ def analyze(text, model, metadata, explain=True):
         "statistiques": stats,
         "avertissements": warnings,
         "explication": explanation,
+        "fautes": errors,
+        "seuils": {"humain": low, "ia": high},
     }
